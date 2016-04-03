@@ -1,133 +1,130 @@
+/*jslint node: true*/
+/*jslint nomen: true*/
+/*global angular*/
+/*global PouchDB*/
+/*jslint es5: true */
+'use strict';
+
 angular.module("pouchapp", ["ui.router"])
 
-.run(function($pouchDB) {
-    $pouchDB.setDatabase("nraboy-test");
-    $pouchDB.sync("http://localhost:4984/test-database");
-})
 
-.config(function($stateProvider, $urlRouterProvider) {
-    $stateProvider
-        .state("list", {
-            "url": "/list",
-            "templateUrl": "templates/list.html",
-            "controller": "MainController"
-        })
-        .state("item", {
-            "url": "/item/:documentId/:documentRevision",
-            "templateUrl": "templates/item.html",
-            "controller": "MainController"
-        });
-    $urlRouterProvider.otherwise("list");
-})
+//This piece of code says to run this function after loading.
+//Essentially, it sets the database in $pouchDB, to nraboy-test
+//And sets the sync to local.
+//This run runs $pouchDB, which is listed as a SERVICE below.
+    .run(['$pouchDB', function ($pouchDB) {
+        $pouchDB.setDatabase("nraboy-test");
+        //$pouchDB.sync("http://localhost:4984/test-database");
+    }]) //end run
 
-.controller("MainController", function($scope, $rootScope, $state, $stateParams, $pouchDB) {
 
-    $scope.items = {};
+//I believe this section runs before run (), 
+//because it performs ON module loading.
 
-    $pouchDB.startListening();
+//this is actually a routing area.
+//when the URL is "list" then you go to the list template
+//when the URL is item, you go to the item template
+//list is the default view.
+    .config(['$stateProvider', '$urlRouterProvider', function ($stateProvider, $urlRouterProvider) {
+        $stateProvider
+            .state("list", {
+                "url": "/list",
+                "templateUrl": "templates/list.html",
+                "controller": "MainController"
+            })
+            .state("item", {
+                "url": "/item/:documentId/:documentRevision",
+                "templateUrl": "templates/item.html",
+                "controller": "MainController"
+            });
+        $urlRouterProvider.otherwise("list");
+    }])
 
-    // Listen for changes which include create or update events
-    $rootScope.$on("$pouchDB:change", function(event, data) {
-        $scope.items[data.doc._id] = data.doc;
-        $scope.$apply();
-    });
 
-    // Listen for changes which include only delete events
-    $rootScope.$on("$pouchDB:delete", function(event, data) {
-        delete $scope.items[data.doc._id];
-        $scope.$apply();
-    });
 
-    // Look up a document if we landed in the info screen for editing a document
-    if($stateParams.documentId) {
-        $pouchDB.get($stateParams.documentId).then(function(result) {
-            $scope.inputForm = result;
-        });
-    }
 
-    // Save a document with either an update or insert
-    $scope.save = function(firstname, lastname, email) {
-        var jsonDocument = {
-            "firstname": firstname,
-            "lastname": lastname,
-            "email": email
+
+
+
+
+    .service("$pouchDB", ["$rootScope", "$q", function ($rootScope, $q) {
+
+        var database, changeListener;
+
+        //set the database, which now inherits all properties of new PouchDB
+        this.setDatabase = function (databaseName) {
+            //database is global (from above)
+            database = new PouchDB(databaseName);
         };
-        // If we're updating, provide the most recent revision and document id
-        if($stateParams.documentId) {
-            jsonDocument["_id"] = $stateParams.documentId;
-            jsonDocument["_rev"] = $stateParams.documentRevision;
-        }
-        $pouchDB.save(jsonDocument).then(function(response) {
-            $state.go("list");
-        }, function(error) {
-            console.log("ERROR -> " + error);
-        });
-    }
 
-    $scope.delete = function(id, rev) {
-        $pouchDB.delete(id, rev);
-    }
+        
+        //startListening is a function that watches for realtime db updates
+        //if one happens, then it broadcasts to the rootscope with change or
+        //delete.
+        this.startListening = function () {
+            //changes gives realtime updates to the database
+            //adding since.now will only go from this point forward
+            changeListener = database.changes({
+                live: true,
+                include_docs: true
+            }).on("change", function (change) {
+                if (!change.deleted) {
+                    $rootScope.$broadcast("$pouchDB:change", change);
+                } else {
+                    $rootScope.$broadcast("$pouchDB:delete", change);
+                }
+            });
+        };
+        
+        //cancel() is a method that gets inherited from changes(), 
+        //it tells the changeListener to stop monitoring.
+        this.stopListening = function () {
+            changeListener.cancel();
+        };
 
-})
+        //this would sync to a remote database, which needs
+        //to be passed into this function.
+        this.sync = function (remoteDatabase) {
+            database.sync(remoteDatabase, {live: true, retry: true});
+        };
 
-.service("$pouchDB", ["$rootScope", "$q", function($rootScope, $q) {
-
-    var database;
-    var changeListener;
-
-    this.setDatabase = function(databaseName) {
-        database = new PouchDB(databaseName);
-    }
-
-    this.startListening = function() {
-        changeListener = database.changes({
-            live: true,
-            include_docs: true
-        }).on("change", function(change) {
-            if(!change.deleted) {
-                $rootScope.$broadcast("$pouchDB:change", change);
+        
+        //This is a deferred / promises way of saving a document to the database
+        //The bulk of the code has to do with if/else on the _id character
+        this.save = function (jsonDocument) {
+            //establish deferred as a type of $q.defer()
+            var deferred = $q.defer();
+            //if there is not an _id given with the document, e.g., its new, 
+            //post the document to the database
+            if (!jsonDocument._id) {
+                database.post(jsonDocument).then(function (response) {
+                    deferred.resolve(response);
+                }).catch(function (error) {
+                    deferred.reject(error);
+                });
             } else {
-                $rootScope.$broadcast("$pouchDB:delete", change);
+                database.put(jsonDocument).then(function (response) {
+                    deferred.resolve(response);
+                }).catch(function (error) {
+                    deferred.reject(error);
+                });
             }
-        });
-    }
+            return deferred.promise;
+        };
+        
+        
+        
+        //delete an item from the database
+        this.delete = function (documentId, documentRevision) {
+            return database.remove(documentId, documentRevision);
+        };
 
-    this.stopListening = function() {
-        changeListener.cancel();
-    }
+        this.get = function (documentId) {
+            return database.get(documentId);
+        };
 
-    this.sync = function(remoteDatabase) {
-        database.sync(remoteDatabase, {live: true, retry: true});
-    }
+        this.destroy = function () {
+            database.destroy();
+        };
 
-    this.save = function(jsonDocument) {
-        var deferred = $q.defer();
-        if(!jsonDocument._id) {
-            database.post(jsonDocument).then(function(response) {
-                deferred.resolve(response);
-            }).catch(function(error) {
-                deferred.reject(error);
-            });
-        } else {
-            database.put(jsonDocument).then(function(response) {
-                deferred.resolve(response);
-            }).catch(function(error) {
-                deferred.reject(error);
-            });
-        }
-        return deferred.promise;
-    }
-
-    this.delete = function(documentId, documentRevision) {
-        return database.remove(documentId, documentRevision);
-    }
-
-    this.get = function(documentId) {
-        return database.get(documentId);
-    }
-
-    this.destroy = function() {
-        database.destroy();
-    }
-
-}]);
+    }]);
